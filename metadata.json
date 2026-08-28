@@ -1,0 +1,6 @@
+{
+  "name": "Aspect Ratio Video Converter Studio",
+  "description": "Professional video aspect ratio converter and batch editor supporting 16:9, 9:16, 1:1, 4:3, 21:9, custom ratios, blur background, smart crop, trimming, and instant processing.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
