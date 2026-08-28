@@ -20,6 +20,7 @@ import {
   Share2,
   Copy,
   Check,
+  ExternalLink,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -130,6 +131,23 @@ export default function App() {
 
   // Active Video
   const activeVideo = videos.find((v) => v.id === activeVideoId) || videos[0];
+
+  // Auto-sync active output URL when active video or batch items change
+  useEffect(() => {
+    if (!activeVideo) {
+      setActiveOutputUrl(null);
+      setActiveOutputSize(undefined);
+      return;
+    }
+    const completedItem =
+      batchItems.find((i) => i.video.id === activeVideo.id && i.status === 'completed' && i.outputBlobUrl) ||
+      historyItems.find((h) => h.video.id === activeVideo.id && h.status === 'completed' && h.outputBlobUrl);
+
+    if (completedItem && completedItem.outputBlobUrl) {
+      setActiveOutputUrl(completedItem.outputBlobUrl);
+      setActiveOutputSize(completedItem.outputSize);
+    }
+  }, [activeVideo?.id, batchItems, historyItems]);
 
   // Save history & presets to localStorage
   useEffect(() => {
@@ -409,7 +427,7 @@ export default function App() {
             )
           );
 
-          if (item.video.id === activeVideo?.id) {
+          if (item.video.id === activeVideo?.id || itemsToProcess.length === 1 || !activeOutputUrl) {
             setActiveOutputUrl(convertedUrl);
             if (convertedSize) setActiveOutputSize(convertedSize);
           }
@@ -425,6 +443,9 @@ export default function App() {
           setHistoryItems((prev) => [historyEntry, ...prev]);
         }
       }
+
+      // Automatically switch to export tab so download button is immediately front and center
+      setActiveTab('export');
 
       // Trigger celebratory confetti on completion
       confetti({
@@ -648,6 +669,78 @@ export default function App() {
               {/* Tab 4: Export & Conversion Trigger */}
               {activeTab === 'export' && (
                 <div className="space-y-4">
+                  {/* Converted Output Ready Banner */}
+                  {activeOutputUrl && (
+                    <div className="bg-[#161622] border-2 border-emerald-500/60 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-2xl animate-fadeIn">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/30 shrink-0 shadow-md">
+                            <CheckCircle2 className="w-5 h-5" />
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-sm text-white">Video Ready to Download</h4>
+                            <p className="text-xs text-slate-400 font-mono">
+                              {settings.aspectRatioId} • {settings.targetWidth}×{settings.targetHeight} •{' '}
+                              {activeOutputSize ? formatBytes(activeOutputSize) : 'Complete'}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold">
+                          READY
+                        </span>
+                      </div>
+
+                      {/* Primary Download Button */}
+                      <button
+                        type="button"
+                        id="btn-download-export-tab"
+                        onClick={() => {
+                          if (activeOutputUrl && activeVideo) {
+                            const safeRatio = (settings.aspectRatioId || 'custom').replace(/:/g, '-');
+                            const safeBaseName = activeVideo.name.replace(/\.[^/.]+$/, '');
+                            downloadMedia(
+                              activeOutputUrl,
+                              `Converted_${safeRatio}_${safeBaseName}`,
+                              settings.container || 'mp4'
+                            );
+                          }
+                        }}
+                        className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-sm shadow-xl shadow-emerald-600/30 flex items-center justify-center gap-2 transition active:scale-95 cursor-pointer"
+                      >
+                        <Download className="w-5 h-5" />
+                        Download Video ({activeOutputSize ? formatBytes(activeOutputSize) : 'MP4'})
+                      </button>
+
+                      {/* Secondary Actions */}
+                      <div className="grid grid-cols-2 gap-2">
+                        <a
+                          href={activeOutputUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="py-2 px-3 rounded-xl bg-[#222232] hover:bg-[#2A2A3E] text-slate-200 border border-[#303046] text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5 text-indigo-400" />
+                          Open in Tab
+                        </a>
+                        <button
+                          type="button"
+                          onClick={handleCopyShareLink}
+                          className="py-2 px-3 rounded-xl bg-[#222232] hover:bg-[#2A2A3E] text-slate-200 border border-[#303046] text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95"
+                        >
+                          {copiedLink ? (
+                            <>
+                              <Check className="w-3.5 h-3.5 text-emerald-400" /> Copied!
+                            </>
+                          ) : (
+                            <>
+                              <Share2 className="w-3.5 h-3.5 text-indigo-400" /> Share Link
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="bg-[#161622] border border-[#262638] rounded-2xl p-4 space-y-3 shadow-md">
                     <h4 className="font-bold text-xs uppercase tracking-wider text-slate-300">
                       Conversion Summary
@@ -696,18 +789,27 @@ export default function App() {
                     </div>
                   )}
 
-                  {/* Export Button */}
+                  {/* Convert / Re-convert Button */}
                   <button
                     type="button"
                     id="btn-convert-video"
                     disabled={isProcessing}
                     onClick={() => handleStartConversion()}
-                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 disabled:opacity-50 text-white font-bold text-sm shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-2 transition active:scale-95"
+                    className={`w-full py-3.5 px-4 rounded-2xl font-bold text-sm shadow-xl flex items-center justify-center gap-2 transition active:scale-95 ${
+                      activeOutputUrl
+                        ? 'bg-[#222232] hover:bg-[#2A2A3E] text-slate-200 border border-[#303046]'
+                        : 'bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white shadow-indigo-600/30'
+                    }`}
                   >
                     {isProcessing ? (
                       <>
                         <RefreshCw className="w-4 h-4 animate-spin" />
                         Converting Video...
+                      </>
+                    ) : activeOutputUrl ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 text-indigo-400" />
+                        Re-Convert with Current Settings
                       </>
                     ) : (
                       <>

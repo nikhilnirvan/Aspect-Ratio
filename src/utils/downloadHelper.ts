@@ -9,11 +9,11 @@ export function sanitizeFilename(filename: string, fallback = 'converted_video.m
   return clean || fallback;
 }
 
-export function downloadMedia(
+export async function downloadMedia(
   urlOrBlob: string | Blob,
   filename: string,
   container: string = 'mp4'
-): void {
+): Promise<void> {
   try {
     let cleanName = sanitizeFilename(filename);
     
@@ -30,8 +30,26 @@ export function downloadMedia(
     if (urlOrBlob instanceof Blob) {
       downloadUrl = URL.createObjectURL(urlOrBlob);
       shouldRevoke = true;
+    } else if (typeof urlOrBlob === 'string') {
+      if (urlOrBlob.startsWith('blob:') || urlOrBlob.startsWith('data:')) {
+        downloadUrl = urlOrBlob;
+      } else {
+        // Fetch server URL as Blob so the browser forces a file download dialog rather than playing in-tab
+        try {
+          const res = await fetch(urlOrBlob);
+          if (res.ok) {
+            const blob = await res.blob();
+            downloadUrl = URL.createObjectURL(blob);
+            shouldRevoke = true;
+          } else {
+            downloadUrl = urlOrBlob;
+          }
+        } catch {
+          downloadUrl = urlOrBlob;
+        }
+      }
     } else {
-      downloadUrl = urlOrBlob;
+      downloadUrl = String(urlOrBlob);
     }
 
     const a = document.createElement('a');
@@ -52,12 +70,20 @@ export function downloadMedia(
           URL.revokeObjectURL(downloadUrl);
         }
       } catch {}
-    }, 1500);
+    }, 2500);
   } catch (err) {
     console.error('Download helper error:', err);
-    // Fallback: if URL string, attempt direct navigation/window open
+    // Fallback: if URL string, attempt direct navigation
     if (typeof urlOrBlob === 'string') {
-      window.open(urlOrBlob, '_blank');
+      const a = document.createElement('a');
+      a.href = urlOrBlob;
+      a.target = '_blank';
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        try { document.body.removeChild(a); } catch {}
+      }, 1000);
     }
   }
 }
