@@ -147,3 +147,101 @@ export interface ConversionJobResponse {
   error?: string;
   timeRemainingSec?: number;
 }
+
+export interface VideoStreamDiagnostic {
+  hasVideo: boolean;
+  codec?: string;
+  codecLongName?: string;
+  profile?: string;
+  level?: number | string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  pixFmt?: string;
+  startTime?: number;
+  duration?: number;
+  totalFrames?: number;
+  bitrateKbps?: number;
+  isWebSafe: boolean;
+}
+
+export interface AudioStreamDiagnostic {
+  hasAudio: boolean;
+  codec?: string;
+  codecLongName?: string;
+  channels?: number;
+  channelLayout?: string;
+  sampleRate?: number;
+  startTime?: number;
+  duration?: number;
+  bitrateKbps?: number;
+}
+
+export interface StreamSyncDiagnostic {
+  status: 'in-sync' | 'slight-offset' | 'desynchronized' | 'no-video' | 'no-audio';
+  ptsDeltaSec: number;
+  explanation: string;
+}
+
+export interface ContainerDiagnostic {
+  format: string;
+  duration: number;
+  bitrateKbps: number;
+  sizeBytes: number;
+  fastStart: boolean;
+}
+
+export interface BrowserPlaybackDiagnostic {
+  decodedFrames?: number;
+  droppedFrames?: number;
+  corruptedFrames?: number;
+  isRenderingCanvasOk?: boolean;
+  videoWidth?: number;
+  videoHeight?: number;
+  playbackError?: string;
+}
+
+export interface VideoDiagnostics {
+  healthy: boolean;
+  healthRating: 'perfect' | 'good' | 'warning' | 'critical';
+  summary: string;
+  source: 'server-ffprobe' | 'browser-decoder' | 'hybrid';
+  container: ContainerDiagnostic;
+  videoStream: VideoStreamDiagnostic;
+  audioStream: AudioStreamDiagnostic;
+  sync: StreamSyncDiagnostic;
+  browserPlayback?: BrowserPlaybackDiagnostic;
+  recommendations: string[];
+  analyzedAt: string;
+  targetFilename?: string;
+  rawProbe?: any;
+}
+
+export type ProcessingEngineMode = 'auto' | 'server-ffmpeg' | 'client-fallback';
+
+export interface EngineStatus {
+  status: 'ready' | 'degraded' | 'checking' | 'offline';
+  serverAvailable: boolean;
+  activeEngine: 'server-ffmpeg' | 'client-fallback';
+  engineName: string;
+  ffmpeg?: {
+    available: boolean;
+    version: string;
+    codecs: string[];
+    filters: string[];
+  };
+  ffprobe?: {
+    available: boolean;
+    version: string;
+  };
+  features?: string[];
+  clientFallbackSupport?: {
+    available: boolean;
+    technology: string;
+    limitations: string[];
+  };
+  latencyMs?: number;
+  checkedAt?: string;
+  error?: string;
+}
+

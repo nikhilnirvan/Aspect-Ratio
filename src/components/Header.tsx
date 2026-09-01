@@ -1,6 +1,7 @@
 import React from 'react';
 import { Video, Sparkles, Layers, History, Bookmark, Monitor, Moon, Sun, HelpCircle, HardDrive } from 'lucide-react';
-import { UserPreset } from '../types';
+import { UserPreset, EngineStatus, ProcessingEngineMode } from '../types';
+import { EngineStatusBadge } from './EngineStatusBadge';
 
 interface HeaderProps {
   batchCount: number;
@@ -11,6 +12,11 @@ interface HeaderProps {
   onOpenHelp: () => void;
   activePresetName?: string;
   isProcessing: boolean;
+  engineStatus: EngineStatus | null;
+  engineMode: ProcessingEngineMode;
+  onSelectEngineMode: (mode: ProcessingEngineMode) => void;
+  onRefreshEngineStatus: () => void;
+  isCheckingEngine?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -22,17 +28,22 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenHelp,
   activePresetName,
   isProcessing,
+  engineStatus,
+  engineMode,
+  onSelectEngineMode,
+  onRefreshEngineStatus,
+  isCheckingEngine = false,
 }) => {
   return (
-    <header className="border-b border-[#1E1E2A] bg-[#0A0A0C]/90 backdrop-blur-xl sticky top-0 z-30 px-4 lg:px-8 py-3.5 flex items-center justify-between text-slate-200 shadow-xl">
+    <header className="border-b border-[#1E1E2A] bg-[#0A0A0C]/90 backdrop-blur-xl sticky top-0 z-30 px-3 sm:px-4 lg:px-8 py-3 flex items-center justify-between text-slate-200 shadow-xl">
       {/* Brand & Title */}
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-indigo-600 to-violet-700 flex items-center justify-center shadow-lg shadow-indigo-500/25 border border-indigo-400/30">
+        <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 via-indigo-600 to-violet-700 flex items-center justify-center shadow-lg shadow-indigo-500/25 border border-indigo-400/30 shrink-0">
           <Video className="w-5 h-5 text-white" />
         </div>
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="font-bold tracking-tight text-lg text-white">Aspect Studio</h1>
+          <div className="flex items-center gap-2 flex-wrap">
+            <h1 className="font-bold tracking-tight text-base sm:text-lg text-white">Aspect Studio</h1>
             <span className="text-[10px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
               Pro v2.4
             </span>
@@ -49,13 +60,22 @@ export const Header: React.FC<HeaderProps> = ({
         </div>
       </div>
 
-      {/* Action Buttons */}
-      <div className="flex items-center gap-2 sm:gap-3">
+      {/* Action Buttons & Engine Status */}
+      <div className="flex items-center gap-1.5 sm:gap-2.5">
+        {/* Processing Engine Availability Status Badge */}
+        <EngineStatusBadge
+          engineStatus={engineStatus}
+          engineMode={engineMode}
+          onSelectEngineMode={onSelectEngineMode}
+          onRefreshStatus={onRefreshEngineStatus}
+          isChecking={isCheckingEngine}
+        />
+
         {/* AI Smart Framing Trigger */}
         <button
           id="btn-open-ai-crop"
           onClick={onOpenAI}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border border-violet-500/30 transition shadow-sm hover:text-white active:scale-95"
+          className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-semibold rounded-xl bg-violet-500/15 hover:bg-violet-500/25 text-violet-300 border border-violet-500/30 transition shadow-sm hover:text-white active:scale-95"
         >
           <Sparkles className="w-3.5 h-3.5 text-violet-400 animate-pulse" />
           <span className="hidden md:inline">AI Smart Framing</span>
@@ -66,7 +86,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           id="btn-open-presets"
           onClick={onOpenPresets}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
+          className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
           title="Custom Presets"
         >
           <Bookmark className="w-3.5 h-3.5 text-amber-400" />
@@ -77,7 +97,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           id="btn-open-queue"
           onClick={onOpenQueue}
-          className="relative flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
+          className="relative flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
         >
           <Layers className="w-3.5 h-3.5 text-indigo-400" />
           <span className="hidden sm:inline">Queue</span>
@@ -92,7 +112,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           id="btn-open-history"
           onClick={onOpenHistory}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
+          className="flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 text-xs font-medium rounded-xl bg-[#16161F] hover:bg-[#1E1E2C] text-slate-300 border border-[#262638] transition active:scale-95"
           title="Conversion History"
         >
           <History className="w-3.5 h-3.5 text-emerald-400" />
@@ -112,3 +132,4 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+

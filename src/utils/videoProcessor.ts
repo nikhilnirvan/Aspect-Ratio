@@ -375,11 +375,28 @@ export async function convertVideoInBrowser(
     let stream: MediaStream | null = null;
     let recorder: MediaRecorder | null = null;
     let animationFrameId: number | null = null;
+    let intervalTimerId: any = null;
+    let rvfcId: number | null = null;
     let watchdogTimer: NodeJS.Timeout | null = null;
+    let hiddenVideoEl: HTMLVideoElement | null = null;
 
     try {
       const video = document.createElement('video');
+      hiddenVideoEl = video;
       video.crossOrigin = 'anonymous';
+      video.playsInline = true;
+      video.preload = 'auto';
+      // Attach to document to prevent browsers from throttling/freezing the hardware video decoder
+      video.style.position = 'fixed';
+      video.style.top = '0';
+      video.style.left = '0';
+      video.style.width = '1px';
+      video.style.height = '1px';
+      video.style.opacity = '0.001';
+      video.style.pointerEvents = 'none';
+      video.style.zIndex = '-9999';
+      document.body.appendChild(video);
+
       video.src = videoMetadata.url;
       video.muted = settings.audioMode === 'mute';
       const playbackSpeed = Math.max(0.25, Math.min(4.0, settings.playbackSpeed || 1.0));
@@ -401,7 +418,7 @@ export async function convertVideoInBrowser(
       const canvas = document.createElement('canvas');
       canvas.width = targetW;
       canvas.height = targetH;
-      const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+      const ctx = canvas.getContext('2d', { alpha: false });
       if (!ctx) throw new Error('Canvas 2D context not available');
 
       // Preload background image if needed
@@ -484,7 +501,11 @@ export async function convertVideoInBrowser(
         if (isCleanedUp) return;
         isCleanedUp = true;
         if (animationFrameId !== null) cancelAnimationFrame(animationFrameId);
+        if (intervalTimerId !== null) clearInterval(intervalTimerId);
         if (watchdogTimer !== null) clearTimeout(watchdogTimer);
+        if (hiddenVideoEl && hiddenVideoEl.parentNode) {
+          try { hiddenVideoEl.parentNode.removeChild(hiddenVideoEl); } catch {}
+        }
         video.pause();
         try {
           if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
@@ -523,10 +544,10 @@ export async function convertVideoInBrowser(
         });
       }
 
-      // Hard safety timer: prevent recording from running beyond expected duration + tiny buffer
+      // Hard safety timer: prevent recording from running beyond expected duration + buffer
       watchdogTimer = setTimeout(() => {
         finishRecording();
-      }, (targetWallClockDuration + 0.4) * 1000);
+      }, (targetWallClockDuration + 0.6) * 1000);
 
       video.addEventListener('ended', finishRecording);
       video.addEventListener('timeupdate', () => {
@@ -536,9 +557,14 @@ export async function convertVideoInBrowser(
       });
 
       recorder.start(100);
-      video.play().catch(() => {});
+      try {
+        await video.play();
+      } catch {
+        // Retry play
+        video.play().catch(() => {});
+      }
 
-      const renderLoop = () => {
+      const renderCurrentFrame = () => {
         if (isCleanedUp) return;
 
         if (video.ended || video.currentTime >= trimEnd) {
@@ -551,12 +577,36 @@ export async function convertVideoInBrowser(
         const currentElapsed = Math.max(0, video.currentTime - trimStart);
         const pct = Math.min(99, Math.round((currentElapsed / contentDuration) * 100));
         onProgress(pct, `Encoding frames (${pct}%)`);
-
-        animationFrameId = requestAnimationFrame(renderLoop);
       };
 
-      animationFrameId = requestAnimationFrame(renderLoop);
+      // Continuous multi-clock render driver to guarantee zero frame drops
+      const loopWithRaf = () => {
+        if (isCleanedUp) return;
+        renderCurrentFrame();
+        animationFrameId = requestAnimationFrame(loopWithRaf);
+      };
+      animationFrameId = requestAnimationFrame(loopWithRaf);
+
+      // Dedicated interval fallback in case RAF is throttled by browser tab visibility
+      const frameIntervalMs = Math.round(1000 / Math.max(24, effectiveFps));
+      intervalTimerId = setInterval(() => {
+        if (isCleanedUp) return;
+        renderCurrentFrame();
+      }, frameIntervalMs);
+
+      // Use requestVideoFrameCallback if available for frame-perfect sync
+      if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+        const onFrame = () => {
+          if (isCleanedUp) return;
+          renderCurrentFrame();
+          (video as any).requestVideoFrameCallback(onFrame);
+        };
+        (video as any).requestVideoFrameCallback(onFrame);
+      }
     } catch (err) {
+      if (hiddenVideoEl && hiddenVideoEl.parentNode) {
+        try { hiddenVideoEl.parentNode.removeChild(hiddenVideoEl); } catch {}
+      }
       if (audioCtx) {
         try { (audioCtx as AudioContext).close(); } catch {}
       }

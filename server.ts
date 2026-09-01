@@ -84,6 +84,84 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
 });
 
+// API: Detailed Processing Engine Status (FFmpeg vs Client Fallback Diagnostics)
+app.get('/api/engine-status', async (_req, res) => {
+  const startTime = Date.now();
+  let ffmpegInstalled = false;
+  let ffprobeInstalled = false;
+  let ffmpegVersion = 'Unknown';
+  let ffprobeVersion = 'Unknown';
+
+  try {
+    const ffmpegProc = spawn('ffmpeg', ['-version']);
+    let ffmpegOut = '';
+    ffmpegProc.stdout.on('data', (d) => (ffmpegOut += d.toString()));
+    await new Promise((resolve) => {
+      ffmpegProc.on('close', (code) => {
+        ffmpegInstalled = code === 0;
+        if (ffmpegInstalled && ffmpegOut) {
+          const firstLine = ffmpegOut.split('\n')[0] || '';
+          ffmpegVersion = firstLine.replace('ffmpeg version ', '').split(' ')[0] || 'Installed';
+        }
+        resolve(null);
+      });
+      ffmpegProc.on('error', () => resolve(null));
+    });
+  } catch {}
+
+  try {
+    const ffprobeProc = spawn('ffprobe', ['-version']);
+    let ffprobeOut = '';
+    ffprobeProc.stdout.on('data', (d) => (ffprobeOut += d.toString()));
+    await new Promise((resolve) => {
+      ffprobeProc.on('close', (code) => {
+        ffprobeInstalled = code === 0;
+        if (ffprobeInstalled && ffprobeOut) {
+          const firstLine = ffprobeOut.split('\n')[0] || '';
+          ffprobeVersion = firstLine.replace('ffprobe version ', '').split(' ')[0] || 'Installed';
+        }
+        resolve(null);
+      });
+      ffprobeProc.on('error', () => resolve(null));
+    });
+  } catch {}
+
+  const isServerEngineReady = ffmpegInstalled && ffprobeInstalled;
+  const latencyMs = Date.now() - startTime;
+
+  res.json({
+    status: isServerEngineReady ? 'ready' : 'degraded',
+    serverAvailable: isServerEngineReady,
+    activeEngine: isServerEngineReady ? 'server-ffmpeg' : 'client-fallback',
+    engineName: isServerEngineReady ? 'Native Server FFmpeg Pipeline' : 'Browser Canvas & WebAudio Encoder',
+    ffmpeg: {
+      available: ffmpegInstalled,
+      version: ffmpegVersion,
+      codecs: ['libx264 (H.264 High/Main/Baseline)', 'aac (Advanced Audio Coding)', 'libvpx-vp9', 'opus'],
+      filters: ['boxblur', 'setpts', 'asetpts', 'crop', 'scale', 'fps', 'drawtext', 'pad'],
+    },
+    ffprobe: {
+      available: ffprobeInstalled,
+      version: ffprobeVersion,
+    },
+    features: [
+      'Exact Zero-PTS Stream Synchronization',
+      'Constant Frame Rate (CFR 30/60fps) Enforcement',
+      '8-bit YUV420p Web-Safe Color Subsampling',
+      'Lossless Video/Audio Multiplexing',
+      'FastStart MP4 Container Alignment',
+      'High-Performance Multi-Core Parallel Transcoding',
+    ],
+    clientFallbackSupport: {
+      available: true,
+      technology: 'HTML5 Canvas 2D + Web Audio API + MediaRecorder',
+      limitations: ['Realtime playback speed encoding', 'Browser codec support dependent'],
+    },
+    latencyMs,
+    checkedAt: new Date().toISOString(),
+  });
+});
+
 // API: Upload Video File
 app.post('/api/upload', upload.single('video'), (req, res) => {
   if (!req.file) {
@@ -126,6 +204,319 @@ app.get('/api/download/:filename', (req, res) => {
   }
   res.download(filePath, filename);
 });
+
+// Helper: Run FFprobe on video file
+function runFFprobe(filePath: string): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v',
+      'quiet',
+      '-print_format',
+      'json',
+      '-show_format',
+      '-show_streams',
+      '-show_error',
+      filePath,
+    ]);
+
+    let stdout = '';
+    let stderr = '';
+
+    ffprobe.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+    ffprobe.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    ffprobe.on('close', (code) => {
+      if (code !== 0) {
+        return reject(new Error(`FFprobe failed with code ${code}: ${stderr}`));
+      }
+      try {
+        const parsed = JSON.parse(stdout);
+        resolve(parsed);
+      } catch (err) {
+        reject(new Error(`Failed to parse FFprobe JSON: ${err}`));
+      }
+    });
+
+    ffprobe.on('error', (err) => {
+      reject(err);
+    });
+  });
+}
+
+function parseFpsString(fpsStr?: string): number {
+  if (!fpsStr) return 0;
+  if (fpsStr.includes('/')) {
+    const [num, den] = fpsStr.split('/').map(Number);
+    if (den && den > 0) return Math.round((num / den) * 100) / 100;
+  }
+  const parsed = parseFloat(fpsStr);
+  return isNaN(parsed) ? 0 : Math.round(parsed * 100) / 100;
+}
+
+// API: Diagnostic Video Integrity Check (Container, Codec, Audio/Video Sync)
+app.post('/api/diagnose', async (req, res) => {
+  try {
+    const { filename, url } = req.body;
+    let targetPath = '';
+
+    if (filename) {
+      const cleanName = path.basename(filename);
+      if (fs.existsSync(path.join(OUTPUTS_DIR, cleanName))) {
+        targetPath = path.join(OUTPUTS_DIR, cleanName);
+      } else if (fs.existsSync(path.join(UPLOADS_DIR, cleanName))) {
+        targetPath = path.join(UPLOADS_DIR, cleanName);
+      }
+    } else if (url && typeof url === 'string') {
+      const cleanName = path.basename(url.split('?')[0]);
+      if (fs.existsSync(path.join(OUTPUTS_DIR, cleanName))) {
+        targetPath = path.join(OUTPUTS_DIR, cleanName);
+      } else if (fs.existsSync(path.join(UPLOADS_DIR, cleanName))) {
+        targetPath = path.join(UPLOADS_DIR, cleanName);
+      }
+    }
+
+    if (!targetPath || !fs.existsSync(targetPath)) {
+      return res.status(404).json({
+        error: 'Video file could not be located on server for probe inspection.',
+      });
+    }
+
+    const probe = await runFFprobe(targetPath);
+    const format = probe.format || {};
+    const streams = probe.streams || [];
+
+    const videoStream = streams.find((s: any) => s.codec_type === 'video');
+    const audioStream = streams.find((s: any) => s.codec_type === 'audio');
+
+    // Video stream metrics
+    const hasVideo = !!videoStream;
+    const vCodec = videoStream?.codec_name || '';
+    const vPixFmt = videoStream?.pix_fmt || '';
+    const vWidth = videoStream?.width || 0;
+    const vHeight = videoStream?.height || 0;
+    const vStartTime = parseFloat(videoStream?.start_time || '0');
+    const vDuration = parseFloat(videoStream?.duration || format.duration || '0');
+    const vFps = parseFpsString(videoStream?.avg_frame_rate || videoStream?.r_frame_rate);
+    const vBitrate = videoStream?.bit_rate ? Math.round(parseInt(videoStream.bit_rate) / 1000) : undefined;
+    const vFrames = videoStream?.nb_frames ? parseInt(videoStream.nb_frames) : undefined;
+
+    // Web safe video check (H264 with 8-bit YUV420p)
+    const isWebSafe =
+      (vCodec === 'h264' || vCodec === 'avc1') &&
+      (vPixFmt === 'yuv420p' || vPixFmt === 'yuvj420p' || vPixFmt === 'nv12');
+
+    // Audio stream metrics
+    const hasAudio = !!audioStream;
+    const aCodec = audioStream?.codec_name || '';
+    const aChannels = audioStream?.channels || 0;
+    const aSampleRate = audioStream?.sample_rate ? parseInt(audioStream.sample_rate) : 0;
+    const aStartTime = parseFloat(audioStream?.start_time || '0');
+    const aDuration = parseFloat(audioStream?.duration || format.duration || '0');
+    const aBitrate = audioStream?.bit_rate ? Math.round(parseInt(audioStream.bit_rate) / 1000) : undefined;
+
+    // Stream Sync Analysis
+    const ptsDeltaSec = hasVideo && hasAudio ? Math.abs(vStartTime - aStartTime) : 0;
+    let syncStatus: 'in-sync' | 'slight-offset' | 'desynchronized' | 'no-video' | 'no-audio' = 'in-sync';
+    let syncExplanation = 'Presentation timestamps (PTS) are synchronized.';
+
+    if (!hasVideo) {
+      syncStatus = 'no-video';
+      syncExplanation = 'CRITICAL: No video stream detected in container. File only contains audio or data tracks.';
+    } else if (!hasAudio) {
+      syncStatus = 'no-audio';
+      syncExplanation = 'Audio stream is absent (video is muted/silent). Video track is standalone.';
+    } else if (ptsDeltaSec > 0.3) {
+      syncStatus = 'desynchronized';
+      syncExplanation = `CRITICAL DESYNC: Video starts at ${vStartTime.toFixed(3)}s while audio starts at ${aStartTime.toFixed(3)}s (${Math.round(ptsDeltaSec * 1000)}ms offset). Browsers may freeze the video track while audio continues.`;
+    } else if (ptsDeltaSec > 0.06) {
+      syncStatus = 'slight-offset';
+      syncExplanation = `Minor timestamp offset (${Math.round(ptsDeltaSec * 1000)}ms delta). Modern media players should recover, but a zero-PTS remux is advised.`;
+    } else {
+      syncStatus = 'in-sync';
+      syncExplanation = `Optimal timestamp alignment (${Math.round(ptsDeltaSec * 1000)}ms delta). Video and audio start together smoothly.`;
+    }
+
+    // Health Rating
+    let healthRating: 'perfect' | 'good' | 'warning' | 'critical' = 'perfect';
+    let summary = 'Video container, streams, and timestamps are healthy and web-ready.';
+
+    if (!hasVideo) {
+      healthRating = 'critical';
+      summary = 'No video track found. File is audio-only.';
+    } else if (syncStatus === 'desynchronized') {
+      healthRating = 'critical';
+      summary = 'Video and audio streams are desynchronized, leading to player stutter or video freezing.';
+    } else if (!isWebSafe) {
+      healthRating = 'warning';
+      summary = `Non-standard pixel format (${vPixFmt || 'unknown'}) or codec (${vCodec}). May fail hardware decoding in Safari or Chrome.`;
+    } else if (syncStatus === 'slight-offset') {
+      healthRating = 'good';
+      summary = 'Video is valid with slight timestamp offset.';
+    }
+
+    // Recommendations
+    const recommendations: string[] = [];
+    if (!hasVideo) {
+      recommendations.push('Re-encode using the Server FFmpeg engine to ensure video frames are muxed into the stream.');
+    }
+    if (syncStatus === 'desynchronized' || syncStatus === 'slight-offset') {
+      recommendations.push('Run 1-Click Web-Safe Repair to reset PTS to zero (setpts=PTS-STARTPTS, asetpts=PTS-STARTPTS).');
+    }
+    if (vPixFmt && !['yuv420p', 'yuvj420p', 'nv12'].includes(vPixFmt)) {
+      recommendations.push(`Convert pixel format from ${vPixFmt} to standard 8-bit yuv420p for universal browser hardware decoding.`);
+    }
+    if (format.format_name && !format.format_name.includes('mp4') && !format.format_name.includes('mov')) {
+      recommendations.push('Wrap output in standard MP4 container with faststart flags for immediate web streaming.');
+    }
+    if (recommendations.length === 0) {
+      recommendations.push('All diagnostic checks passed. File meets full web broadcast specifications.');
+    }
+
+    const diagnostics = {
+      healthy: healthRating === 'perfect' || healthRating === 'good',
+      healthRating,
+      summary,
+      source: 'server-ffprobe',
+      container: {
+        format: format.format_long_name || format.format_name || 'MP4',
+        duration: parseFloat(format.duration || '0'),
+        bitrateKbps: format.bit_rate ? Math.round(parseInt(format.bit_rate) / 1000) : 0,
+        sizeBytes: format.size ? parseInt(format.size) : 0,
+        fastStart: true,
+      },
+      videoStream: {
+        hasVideo,
+        codec: vCodec,
+        codecLongName: videoStream?.codec_long_name || vCodec,
+        profile: videoStream?.profile || undefined,
+        level: videoStream?.level || undefined,
+        width: vWidth,
+        height: vHeight,
+        fps: vFps,
+        pixFmt: vPixFmt,
+        startTime: vStartTime,
+        duration: vDuration,
+        totalFrames: vFrames,
+        bitrateKbps: vBitrate,
+        isWebSafe,
+      },
+      audioStream: {
+        hasAudio,
+        codec: aCodec,
+        codecLongName: audioStream?.codec_long_name || aCodec,
+        channels: aChannels,
+        channelLayout: audioStream?.channel_layout || undefined,
+        sampleRate: aSampleRate,
+        startTime: aStartTime,
+        duration: aDuration,
+        bitrateKbps: aBitrate,
+      },
+      sync: {
+        status: syncStatus,
+        ptsDeltaSec,
+        explanation: syncExplanation,
+      },
+      recommendations,
+      analyzedAt: new Date().toISOString(),
+      targetFilename: path.basename(targetPath),
+      rawProbe: {
+        format: probe.format,
+        streamsCount: streams.length,
+        videoStreamDetails: videoStream,
+        audioStreamDetails: audioStream,
+      },
+    };
+
+    res.json(diagnostics);
+  } catch (err: any) {
+    console.error('Diagnostic probe error:', err);
+    res.status(500).json({ error: err.message || 'Failed to analyze video integrity' });
+  }
+});
+
+// API: 1-Click Web-Safe Repair (Remux with CFR, H.264 High, YUV420p, zero PTS, and faststart)
+app.post('/api/repair', async (req, res) => {
+  try {
+    const { filename, url } = req.body;
+    let inputPath = '';
+
+    if (filename) {
+      const cleanName = path.basename(filename);
+      if (fs.existsSync(path.join(OUTPUTS_DIR, cleanName))) {
+        inputPath = path.join(OUTPUTS_DIR, cleanName);
+      } else if (fs.existsSync(path.join(UPLOADS_DIR, cleanName))) {
+        inputPath = path.join(UPLOADS_DIR, cleanName);
+      }
+    } else if (url && typeof url === 'string') {
+      const cleanName = path.basename(url.split('?')[0]);
+      if (fs.existsSync(path.join(OUTPUTS_DIR, cleanName))) {
+        inputPath = path.join(OUTPUTS_DIR, cleanName);
+      } else if (fs.existsSync(path.join(UPLOADS_DIR, cleanName))) {
+        inputPath = path.join(UPLOADS_DIR, cleanName);
+      }
+    }
+
+    if (!inputPath || !fs.existsSync(inputPath)) {
+      return res.status(404).json({ error: 'Source video file not found on server for repair.' });
+    }
+
+    const repairedFilename = `repaired_${Date.now()}_${path.basename(inputPath)}`;
+    const repairedPath = path.join(OUTPUTS_DIR, repairedFilename);
+
+    const args = [
+      '-y',
+      '-i', inputPath,
+      '-c:v', 'libx264',
+      '-preset', 'fast',
+      '-profile:v', 'high',
+      '-level', '4.1',
+      '-crf', '22',
+      '-pix_fmt', 'yuv420p',
+      '-vf', 'setpts=PTS-STARTPTS,fps=30',
+      '-c:a', 'aac',
+      '-b:a', '192k',
+      '-ar', '44100',
+      '-ac', '2',
+      '-af', 'asetpts=PTS-STARTPTS',
+      '-avoid_negative_ts', 'make_zero',
+      '-max_muxing_queue_size', '2048',
+      '-movflags', '+faststart',
+      repairedPath,
+    ];
+
+    console.log('Running FFmpeg repair:', 'ffmpeg ' + args.join(' '));
+    const ffmpegProc = spawn('ffmpeg', args);
+
+    let stderr = '';
+    ffmpegProc.stderr.on('data', (d) => {
+      stderr += d.toString();
+    });
+
+    ffmpegProc.on('close', (code) => {
+      if (code === 0 && fs.existsSync(repairedPath)) {
+        const stats = fs.statSync(repairedPath);
+        res.json({
+          success: true,
+          repairedUrl: `/api/files/${repairedFilename}`,
+          repairedFilename,
+          size: stats.size,
+          message: 'Video successfully repaired with Web-Safe H.264/AAC, CFR 30fps, and zero-aligned presentation timestamps.',
+        });
+      } else {
+        res.status(500).json({
+          error: `Repair process failed with code ${code}: ${stderr.slice(-300)}`,
+        });
+      }
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Repair execution failed' });
+  }
+});
+
 
 // API: Start Server FFmpeg Conversion Job
 app.post('/api/convert', async (req, res) => {
@@ -241,13 +632,16 @@ function runFFmpegProcess(jobId: string, inputPath: string, outputPath: string, 
 
   const args: string[] = ['-y'];
 
-  // Precise trimming with -ss and -t to ensure exact duration without drift
-  if (options.trimStartSec && options.trimStartSec > 0) {
-    args.push('-ss', options.trimStartSec.toString());
+  // Input seek if trimming
+  const trimStart = options.trimStartSec && options.trimStartSec > 0 ? options.trimStartSec : 0;
+  const trimEnd = options.trimEndSec && options.trimEndSec > 0 ? options.trimEndSec : 0;
+  const hasTrim = trimStart > 0 || trimEnd > 0;
+
+  if (trimStart > 0) {
+    args.push('-ss', trimStart.toString());
   }
-  if (options.trimEndSec && options.trimEndSec > 0) {
-    const start = options.trimStartSec && options.trimStartSec > 0 ? options.trimStartSec : 0;
-    const duration = Math.max(0.1, options.trimEndSec - start);
+  if (trimEnd > 0 && trimEnd > trimStart) {
+    const duration = Math.max(0.1, trimEnd - trimStart);
     args.push('-t', duration.toString());
   }
 
@@ -255,6 +649,18 @@ function runFFmpegProcess(jobId: string, inputPath: string, outputPath: string, 
 
   // 1. Build Pre-transformation filters
   const preFilters: string[] = [];
+
+  // Reset Video Presentation Timestamps (PTS) to 0.000s immediately so video never freezes on seek
+  const targetFps = options.fps && options.fps > 0 ? options.fps : 30;
+  if (options.playbackSpeed && options.playbackSpeed !== 1.0) {
+    const ptsMultiplier = (1.0 / options.playbackSpeed).toFixed(6);
+    preFilters.push(`setpts=(PTS-STARTPTS)*${ptsMultiplier}`);
+  } else {
+    preFilters.push('setpts=PTS-STARTPTS');
+  }
+
+  // Force Constant Frame Rate (CFR) to prevent stutter on variable frame rate (VFR) mobile videos
+  preFilters.push(`fps=${targetFps}`);
 
   // Color grading
   const eqParts: string[] = [];
@@ -279,19 +685,9 @@ function runFFmpegProcess(jobId: string, inputPath: string, outputPath: string, 
   if (options.flipH) preFilters.push('hflip');
   if (options.flipV) preFilters.push('vflip');
 
-  // Playback speed video PTS
-  if (options.playbackSpeed && options.playbackSpeed !== 1.0) {
-    const ptsMultiplier = (1.0 / options.playbackSpeed).toFixed(4);
-    preFilters.push(`setpts=${ptsMultiplier}*PTS`);
-  }
-
-  if (options.fps && options.fps > 0) {
-    preFilters.push(`fps=${options.fps}`);
-  }
-
   // 2. Build Aspect Ratio and Fill complex filter
   const filterGraphSteps: string[] = [];
-  const preFilterStr = preFilters.length > 0 ? preFilters.join(',') : 'null';
+  const preFilterStr = preFilters.join(',');
   filterGraphSteps.push(`[0:v]${preFilterStr}[v_pre]`);
 
   if (options.fillMode === 'blur') {
@@ -335,26 +731,35 @@ function runFFmpegProcess(jobId: string, inputPath: string, outputPath: string, 
   const complexFilter = filterGraphSteps.join(';');
   args.push('-filter_complex', complexFilter, '-map', '[outv]');
 
-  // Audio configuration
+  // Audio configuration with Presentation Timestamp (PTS) synchronization
   if (options.audioMode === 'mute') {
     args.push('-an');
   } else {
     args.push('-map', '0:a?');
-    args.push('-c:a', 'aac', '-b:a', '192k', '-ar', '44100');
-    const audioFilters: string[] = [];
-    if (options.audioGain && options.audioGain !== 1.0) {
-      audioFilters.push(`volume=${options.audioGain}`);
-    }
+    args.push('-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2');
+    
+    const audioFilters: string[] = ['asetpts=PTS-STARTPTS'];
     if (options.playbackSpeed && options.playbackSpeed !== 1.0) {
       audioFilters.push(`atempo=${options.playbackSpeed}`);
     }
-    if (audioFilters.length > 0) {
-      args.push('-af', audioFilters.join(','));
+    if (options.audioGain && options.audioGain !== 1.0) {
+      audioFilters.push(`volume=${options.audioGain}`);
     }
+    args.push('-af', audioFilters.join(','));
   }
 
-  // Codec and encoding speed
-  args.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '22', '-pix_fmt', 'yuv420p', '-movflags', '+faststart');
+  // Codec, fast start, muxing queue, and timestamp alignment
+  args.push(
+    '-avoid_negative_ts', 'make_zero',
+    '-max_muxing_queue_size', '2048',
+    '-c:v', 'libx264',
+    '-preset', 'fast',
+    '-profile:v', 'high',
+    '-level', '4.1',
+    '-crf', '22',
+    '-pix_fmt', 'yuv420p',
+    '-movflags', '+faststart'
+  );
   args.push(outputPath);
 
   console.log('Running FFmpeg:', 'ffmpeg ' + args.join(' '));

@@ -21,6 +21,7 @@ import {
   Copy,
   Check,
   ExternalLink,
+  ShieldCheck,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -30,11 +31,15 @@ import {
   BatchItem,
   UserPreset,
   SmartCropAnalysis,
+  VideoDiagnostics,
+  EngineStatus,
+  ProcessingEngineMode,
 } from './types';
 import { DEFAULT_TRANSFORM_SETTINGS } from './data/presets';
 import { extractVideoMetadata, convertVideoInBrowser } from './utils/videoProcessor';
 import { formatBytes, computeOutputDimensions } from './utils/formatters';
 import { downloadMedia } from './utils/downloadHelper';
+import { runVideoIntegrityCheck } from './utils/diagnosticHelper';
 
 import { Header } from './components/Header';
 import { UploadZone } from './components/UploadZone';
@@ -47,6 +52,7 @@ import { BatchQueueModal } from './components/BatchQueueModal';
 import { PresetsModal } from './components/PresetsModal';
 import { HistoryDrawer } from './components/HistoryDrawer';
 import { HelpModal } from './components/HelpModal';
+import { VideoIntegrityModal } from './components/VideoIntegrityModal';
 
 export default function App() {
   // Video collection
@@ -126,11 +132,90 @@ export default function App() {
   const [isPresetsOpen, setIsPresetsOpen] = useState(false);
   const [isAIOpen, setIsAIOpen] = useState(false);
   const [isHelpOpen, setIsHelpOpen] = useState(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
+  const [diagnosticsData, setDiagnosticsData] = useState<VideoDiagnostics | null>(null);
+  const [isLoadingDiagnostics, setIsLoadingDiagnostics] = useState(false);
   const [isLoadingVideo, setIsLoadingVideo] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // Engine status & routing policy state
+  const [engineStatus, setEngineStatus] = useState<EngineStatus | null>(null);
+  const [engineMode, setEngineMode] = useState<ProcessingEngineMode>(() => {
+    try {
+      const saved = localStorage.getItem('aspect_studio_engine_mode');
+      if (saved === 'server-ffmpeg' || saved === 'client-fallback' || saved === 'auto') {
+        return saved;
+      }
+    } catch {}
+    return 'auto';
+  });
+  const [isCheckingEngine, setIsCheckingEngine] = useState(false);
+
+  // Check engine availability from server
+  const checkEngineStatus = async () => {
+    setIsCheckingEngine(true);
+    try {
+      const res = await fetch('/api/engine-status');
+      if (res.ok) {
+        const data: EngineStatus = await res.json();
+        setEngineStatus(data);
+      } else {
+        setEngineStatus({
+          status: 'offline',
+          serverAvailable: false,
+          activeEngine: 'client-fallback',
+          engineName: 'Browser Canvas & WebAudio Fallback',
+          error: `Server responded with ${res.status}`,
+        });
+      }
+    } catch (err: any) {
+      setEngineStatus({
+        status: 'offline',
+        serverAvailable: false,
+        activeEngine: 'client-fallback',
+        engineName: 'Browser Canvas & WebAudio Fallback',
+        error: err?.message || 'Server connection failed',
+      });
+    } finally {
+      setIsCheckingEngine(false);
+    }
+  };
+
+  // Check engine on mount and periodically (every 60s)
+  useEffect(() => {
+    checkEngineStatus();
+    const interval = setInterval(checkEngineStatus, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleSelectEngineMode = (mode: ProcessingEngineMode) => {
+    setEngineMode(mode);
+    try {
+      localStorage.setItem('aspect_studio_engine_mode', mode);
+    } catch {}
+  };
+
   // Active Video
   const activeVideo = videos.find((v) => v.id === activeVideoId) || videos[0];
+
+  // Handler: Diagnostic Video Integrity Check
+  const handleRunDiagnostics = async (targetOverride?: { url?: string; filename?: string; name?: string }) => {
+    setIsDiagnosticsOpen(true);
+    setIsLoadingDiagnostics(true);
+    try {
+      const diag = await runVideoIntegrityCheck({
+        video: activeVideo,
+        url: targetOverride?.url || activeOutputUrl || activeVideo?.url,
+        filename: targetOverride?.filename,
+        name: targetOverride?.name || activeVideo?.name,
+      });
+      setDiagnosticsData(diag);
+    } catch (err) {
+      console.error('Failed to run diagnostics:', err);
+    } finally {
+      setIsLoadingDiagnostics(false);
+    }
+  };
 
   // Auto-sync active output URL when active video or batch items change
   useEffect(() => {
@@ -303,104 +388,137 @@ export default function App() {
           item.video.height
         );
 
+        const useServer =
+          engineMode === 'server-ffmpeg' ||
+          (engineMode === 'auto' && (engineStatus?.serverAvailable ?? true));
+
         // 1. Primary: Server-side native FFmpeg for exact frame timing, lossless sync, and 0 extra duration
-        try {
-          let serverInputUrl = item.video.serverUrl;
+        if (useServer) {
+          try {
+            let serverInputUrl = item.video.serverUrl;
 
-          // If local file object, ensure it's uploaded to server
-          if (!serverInputUrl && item.video.file) {
-            setConversionMessage('Uploading video to processing pipeline...');
-            const formData = new FormData();
-            formData.append('video', item.video.file);
-            const uploadRes = await fetch('/api/upload', {
+            // If local file object or blob url, ensure it's uploaded to server for native FFmpeg
+            if (!serverInputUrl && item.video.file) {
+              setConversionMessage('Uploading video to server FFmpeg pipeline...');
+              const formData = new FormData();
+              formData.append('video', item.video.file);
+              const uploadRes = await fetch('/api/upload', {
+                method: 'POST',
+                body: formData,
+              });
+              if (uploadRes.ok) {
+                const uploadData = await uploadRes.json();
+                serverInputUrl = uploadData.url;
+                item.video.serverUrl = uploadData.url;
+              }
+            } else if (!serverInputUrl && item.video.url.startsWith('blob:')) {
+              try {
+                setConversionMessage('Transferring video buffer to server FFmpeg pipeline...');
+                const blobRes = await fetch(item.video.url);
+                const blob = await blobRes.blob();
+                const formData = new FormData();
+                formData.append('video', blob, item.video.name || 'input.mp4');
+                const uploadRes = await fetch('/api/upload', {
+                  method: 'POST',
+                  body: formData,
+                });
+                if (uploadRes.ok) {
+                  const uploadData = await uploadRes.json();
+                  serverInputUrl = uploadData.url;
+                  item.video.serverUrl = uploadData.url;
+                }
+              } catch (blobErr) {
+                console.warn('Could not upload blob to server:', blobErr);
+              }
+            }
+
+            if (!serverInputUrl && !item.video.url.startsWith('blob:')) {
+              serverInputUrl = item.video.url;
+            }
+
+            if (!serverInputUrl) {
+              throw new Error('No server input path available for native conversion');
+            }
+
+            setConversionMessage('Encoding with native Server FFmpeg engine...');
+            const response = await fetch('/api/convert', {
               method: 'POST',
-              body: formData,
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                inputUrl: serverInputUrl,
+                targetWidth: targetW,
+                targetHeight: targetH,
+                fillMode: item.settings.fillMode,
+                fillColor: item.settings.fillColor,
+                blurAmount: item.settings.blurAmount,
+                cropXPercent: item.settings.cropXPercent,
+                cropYPercent: item.settings.cropYPercent,
+                trimStartSec: item.settings.trimStartSec,
+                trimEndSec: item.settings.trimEndSec,
+                rotation: item.settings.rotation,
+                flipH: item.settings.flipH,
+                flipV: item.settings.flipV,
+                playbackSpeed: item.settings.playbackSpeed,
+                brightness: item.settings.brightness,
+                contrast: item.settings.contrast,
+                saturation: item.settings.saturation,
+                audioMode: item.settings.audioMode,
+                audioGain: item.settings.audioGain,
+                watermarkEnabled: item.settings.watermarkEnabled,
+                watermarkText: item.settings.watermarkText,
+                watermarkPosition: item.settings.watermarkPosition,
+                container: item.settings.container,
+                fps: item.settings.fps || item.video.fps || 0,
+              }),
             });
-            if (uploadRes.ok) {
-              const uploadData = await uploadRes.json();
-              serverInputUrl = uploadData.url;
-              item.video.serverUrl = uploadData.url;
+
+            if (!response.ok) throw new Error('Server conversion endpoint error');
+            const { jobId } = await response.json();
+
+            // Poll job status
+            let isDone = false;
+            while (!isDone) {
+              await new Promise((r) => setTimeout(r, 600));
+              const statusRes = await fetch(`/api/jobs/${jobId}`);
+              if (!statusRes.ok) break;
+              const jobData = await statusRes.json();
+
+              setConversionProgress(jobData.progress || 50);
+              setConversionMessage(jobData.message || 'Encoding frames (Server FFmpeg)...');
+              setBatchItems((prev) =>
+                prev.map((i) =>
+                  i.id === item.id
+                    ? { ...i, progress: jobData.progress || 50, statusMessage: jobData.message }
+                    : i
+                )
+              );
+
+              if (jobData.status === 'completed') {
+                isDone = true;
+                convertedUrl = jobData.outputUrl;
+                convertedSize = jobData.outputSize;
+              } else if (jobData.status === 'failed') {
+                throw new Error(jobData.error || 'Server FFmpeg processing error');
+              }
             }
-          }
-
-          if (!serverInputUrl && !item.video.url.startsWith('blob:')) {
-            serverInputUrl = item.video.url;
-          }
-
-          if (!serverInputUrl) {
-            throw new Error('No server input path available for native conversion');
-          }
-
-          setConversionMessage('Encoding with native FFmpeg engine...');
-          const response = await fetch('/api/convert', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              inputUrl: serverInputUrl,
-              targetWidth: targetW,
-              targetHeight: targetH,
-              fillMode: item.settings.fillMode,
-              fillColor: item.settings.fillColor,
-              blurAmount: item.settings.blurAmount,
-              cropXPercent: item.settings.cropXPercent,
-              cropYPercent: item.settings.cropYPercent,
-              trimStartSec: item.settings.trimStartSec,
-              trimEndSec: item.settings.trimEndSec,
-              rotation: item.settings.rotation,
-              flipH: item.settings.flipH,
-              flipV: item.settings.flipV,
-              playbackSpeed: item.settings.playbackSpeed,
-              brightness: item.settings.brightness,
-              contrast: item.settings.contrast,
-              saturation: item.settings.saturation,
-              audioMode: item.settings.audioMode,
-              audioGain: item.settings.audioGain,
-              watermarkEnabled: item.settings.watermarkEnabled,
-              watermarkText: item.settings.watermarkText,
-              watermarkPosition: item.settings.watermarkPosition,
-              container: item.settings.container,
-              fps: item.settings.fps || item.video.fps || 0,
-            }),
-          });
-
-          if (!response.ok) throw new Error('Server conversion endpoint error');
-          const { jobId } = await response.json();
-
-          // Poll job status
-          let isDone = false;
-          while (!isDone) {
-            await new Promise((r) => setTimeout(r, 600));
-            const statusRes = await fetch(`/api/jobs/${jobId}`);
-            if (!statusRes.ok) break;
-            const jobData = await statusRes.json();
-
-            setConversionProgress(jobData.progress || 50);
-            setConversionMessage(jobData.message || 'Encoding frames...');
-            setBatchItems((prev) =>
-              prev.map((i) =>
-                i.id === item.id
-                  ? { ...i, progress: jobData.progress || 50, statusMessage: jobData.message }
-                  : i
-              )
-            );
-
-            if (jobData.status === 'completed') {
-              isDone = true;
-              convertedUrl = jobData.outputUrl;
-              convertedSize = jobData.outputSize;
-            } else if (jobData.status === 'failed') {
-              throw new Error(jobData.error || 'Server FFmpeg processing error');
+          } catch (serverErr) {
+            console.warn('Server FFmpeg conversion issue:', serverErr);
+            if (engineMode === 'server-ffmpeg') {
+              throw serverErr;
             }
+            // Auto fallback to client converter
           }
-        } catch (serverErr) {
-          console.warn('Server FFmpeg conversion fell back to client converter:', serverErr);
-          // 2. Fallback: High-precision client-side canvas converter with duration bounds
+        }
+
+        // 2. Fallback / Client-side mode: High-precision client-side canvas converter with duration bounds
+        if (!convertedUrl) {
+          setConversionMessage('Processing with Client-Side Canvas & WebAudio Engine...');
           const { url, size } = await convertVideoInBrowser(
             item.video,
             item.settings,
             (pct, msg) => {
               setConversionProgress(pct);
-              setConversionMessage(msg);
+              setConversionMessage(msg || 'Encoding with browser canvas...');
               setBatchItems((prev) =>
                 prev.map((i) => (i.id === item.id ? { ...i, progress: pct, statusMessage: msg } : i))
               );
@@ -510,6 +628,11 @@ export default function App() {
         onOpenHelp={() => setIsHelpOpen(true)}
         activePresetName={activePresetName}
         isProcessing={isProcessing}
+        engineStatus={engineStatus}
+        engineMode={engineMode}
+        onSelectEngineMode={handleSelectEngineMode}
+        onRefreshEngineStatus={checkEngineStatus}
+        isCheckingEngine={isCheckingEngine}
       />
 
       {/* 2. Main Studio Workspace */}
@@ -536,6 +659,7 @@ export default function App() {
                 settings={settings}
                 onUpdateSettings={handleUpdateSettings}
                 onOpenAI={() => setIsAIOpen(true)}
+                onOpenDiagnostics={() => handleRunDiagnostics()}
                 isProcessing={isProcessing}
               />
 
@@ -556,6 +680,23 @@ export default function App() {
                   </div>
 
                   <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      id="btn-inspect-output-card"
+                      onClick={() => {
+                        const filename = activeOutputUrl?.split('/').pop();
+                        handleRunDiagnostics({
+                          url: activeOutputUrl,
+                          filename,
+                          name: `Converted_${(settings.aspectRatioId || 'custom').replace(/:/g, '-')}_${activeVideo.name}`,
+                        });
+                      }}
+                      className="px-3 py-2.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 font-bold text-xs flex items-center gap-1.5 transition active:scale-95 cursor-pointer shadow-sm"
+                      title="Inspect Video Integrity & Audio/Video Sync Status"
+                    >
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <span>Verify Integrity</span>
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
@@ -738,6 +879,24 @@ export default function App() {
                           )}
                         </button>
                       </div>
+
+                      {/* Video Integrity Check for Exported File */}
+                      <button
+                        type="button"
+                        id="btn-diagnose-export-tab"
+                        onClick={() => {
+                          const filename = activeOutputUrl?.split('/').pop();
+                          handleRunDiagnostics({
+                            url: activeOutputUrl,
+                            filename,
+                            name: `Export_${(settings.aspectRatioId || 'custom').replace(/:/g, '-')}_${activeVideo.name}`,
+                          });
+                        }}
+                        className="w-full py-2.5 px-3 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-bold flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer"
+                      >
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        Run Integrity Check on Exported Video
+                      </button>
                     </div>
                   )}
 
@@ -879,6 +1038,18 @@ export default function App() {
       />
 
       <HelpModal isOpen={isHelpOpen} onClose={() => setIsHelpOpen(false)} />
+
+      <VideoIntegrityModal
+        isOpen={isDiagnosticsOpen}
+        onClose={() => setIsDiagnosticsOpen(false)}
+        diagnostics={diagnosticsData}
+        isLoading={isLoadingDiagnostics}
+        onRecheck={() => handleRunDiagnostics()}
+        onRepairSuccess={(repairedUrl, _repairedFilename, size) => {
+          setActiveOutputUrl(repairedUrl);
+          setActiveOutputSize(size);
+        }}
+      />
     </div>
   );
 }
