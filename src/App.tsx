@@ -154,6 +154,11 @@ export default function App() {
   // Check engine availability from server
   const checkEngineStatus = async () => {
     setIsCheckingEngine(true);
+    const isVercelHost =
+      typeof window !== 'undefined' &&
+      (window.location.hostname.includes('vercel.app') ||
+        window.location.hostname.includes('now.sh'));
+
     try {
       const res = await fetch('/api/engine-status');
       if (res.ok) {
@@ -161,20 +166,32 @@ export default function App() {
         setEngineStatus(data);
       } else {
         setEngineStatus({
-          status: 'offline',
+          status: 'ready',
           serverAvailable: false,
           activeEngine: 'client-fallback',
-          engineName: 'Browser Canvas & WebAudio Fallback',
-          error: `Server responded with ${res.status}`,
+          engineName: isVercelHost
+            ? 'Client Browser Engine (Vercel Serverless)'
+            : 'Browser Canvas & WebAudio Engine',
+          isVercel: isVercelHost,
+          isServerless: true,
+          error: isVercelHost
+            ? 'Vercel serverless environment (Native Linux binaries not installed in Lambda runtime)'
+            : `Server responded with ${res.status}`,
         });
       }
     } catch (err: any) {
       setEngineStatus({
-        status: 'offline',
+        status: 'ready',
         serverAvailable: false,
         activeEngine: 'client-fallback',
-        engineName: 'Browser Canvas & WebAudio Fallback',
-        error: err?.message || 'Server connection failed',
+        engineName: isVercelHost
+          ? 'Client Browser Engine (Vercel Serverless)'
+          : 'Browser Canvas & WebAudio Engine',
+        isVercel: isVercelHost,
+        isServerless: true,
+        error: isVercelHost
+          ? 'Vercel serverless environment'
+          : err?.message || 'Server connection failed',
       });
     } finally {
       setIsCheckingEngine(false);
@@ -388,9 +405,18 @@ export default function App() {
           item.video.height
         );
 
+        const isVercelHost =
+          typeof window !== 'undefined' &&
+          (window.location.hostname.includes('vercel.app') ||
+            window.location.hostname.includes('now.sh') ||
+            Boolean(engineStatus?.isVercel));
+
+        const isServerOnline = Boolean(engineStatus?.serverAvailable);
+
         const useServer =
-          engineMode === 'server-ffmpeg' ||
-          (engineMode === 'auto' && (engineStatus?.serverAvailable ?? true));
+          !isVercelHost &&
+          (engineMode === 'server-ffmpeg' ||
+            (engineMode === 'auto' && isServerOnline));
 
         // 1. Primary: Server-side native FFmpeg for exact frame timing, lossless sync, and 0 extra duration
         if (useServer) {

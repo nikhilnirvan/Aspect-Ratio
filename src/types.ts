@@ -243,5 +243,7 @@ export interface EngineStatus {
   latencyMs?: number;
   checkedAt?: string;
   error?: string;
+  isVercel?: boolean;
+  isServerless?: boolean;
 }
 
